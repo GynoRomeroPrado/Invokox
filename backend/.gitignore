@@ -1,0 +1,68 @@
+# Python Backend - Git Ignore
+
+# ============================================
+# PYTHON
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Poetry
+poetry.lock
+.poetry/
+
+# ============================================
+# TESTING
+# ============================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+*.cover
+
+# ============================================
+# MYPY / TYPE CHECKING
+# ============================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ============================================
+# DATABASE
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+alembic/versions/*.py
+!alembic/versions/.gitkeep
+
+# ============================================
+# OCR MODELS (no versionar modelos grandes)
+# ============================================
+models/
+*.pth
+*.onnx
+*.pb
+paddleocr_models/
+
+# ============================================
+# CELERY
+# ============================================
+celerybeat-schedule
+celerybeat.pid
+
+# ============================================
+# SECRETS
+# ============================================
+.env
+.env.local
+.env.*.local
