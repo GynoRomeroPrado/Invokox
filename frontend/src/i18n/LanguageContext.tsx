@@ -20,7 +20,7 @@ export function LanguageProvider({ children }: LanguageProviderProps) {
   // Load saved locale from localStorage or use default
   const [locale, setLocaleState] = useState<Locale>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved && (saved === 'es' || saved === 'en')) {
+    if (saved && (saved === 'es' || saved === 'en' || saved === 'pt')) {
       return saved as Locale;
     }
     return DEFAULT_LOCALE;

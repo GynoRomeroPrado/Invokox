@@ -3,7 +3,7 @@ import { useLanguage } from '../i18n';
 
 /**
  * Language selector component
- * Shows current language and allows switching between Spanish and English
+ * Shows current language and allows switching between Spanish, English, and Portuguese
  */
 export function LanguageSelector() {
   const { locale, setLocale } = useLanguage();
@@ -11,6 +11,7 @@ export function LanguageSelector() {
   const languages = [
     { code: 'es', name: 'Español', flag: '🇪🇸' },
     { code: 'en', name: 'English', flag: '🇬🇧' },
+    { code: 'pt', name: 'Português', flag: '🇧🇷' },
   ] as const;
 
   const currentLanguage = languages.find(lang => lang.code === locale) || languages[0];
