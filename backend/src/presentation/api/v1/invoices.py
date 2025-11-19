@@ -4,10 +4,16 @@ Invoice Endpoints
 API REST para gestión de facturas (CRUD completo + operaciones especiales).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Body
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 from typing import List, Optional
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
+import aiofiles
+import os
+import io
+import csv
 
 from src.infrastructure.database.config import get_session_dependency
 from src.infrastructure.repositories.invoice_repository import InvoiceRepository
@@ -15,6 +21,14 @@ from src.infrastructure.repositories.company_repository import CompanyRepository
 from src.application.use_cases.create_invoice_use_case import (
     CreateInvoiceUseCase,
     CreateInvoiceInput
+)
+from src.application.use_cases.process_ocr_use_case import (
+    ProcessOCRUseCase,
+    ProcessOCRInput
+)
+from src.application.use_cases.approve_invoice_use_case import (
+    ApproveInvoiceUseCase,
+    ApproveInvoiceInput
 )
 from src.domain.entities.invoice import Invoice
 from src.domain.entities.invoice_item import InvoiceItem
@@ -499,4 +513,564 @@ async def get_invoices_count(
     return {
         "count": count,
         "filters": filters
+    }
+
+
+# ==============================================================================
+# ENDPOINTS - UPLOAD Y PROCESAMIENTO OCR
+# ==============================================================================
+
+@router.post("/upload", status_code=status.HTTP_201_CREATED)
+async def upload_invoice_file(
+    file: UploadFile = File(..., description="Archivo PDF o imagen de la factura"),
+    created_by: str = Query(..., description="Email del usuario que sube el archivo"),
+    invoice_repo: InvoiceRepository = Depends(get_invoice_repository),
+    company_repo: CompanyRepository = Depends(get_company_repository)
+) -> dict:
+    """
+    Sube un archivo de factura (PDF o imagen) y crea un registro PENDING.
+
+    **Parámetros:**
+    - `file`: Archivo PDF o imagen (PNG, JPG, JPEG)
+    - `created_by`: Email del usuario
+
+    **Returns:**
+    ```json
+    {
+      "invoice_id": 123,
+      "file_path": "/uploads/2025/01/factura_001.pdf",
+      "status": "PENDING",
+      "message": "Archivo subido exitosamente. Usar /invoices/{id}/process para procesar."
+    }
+    ```
+
+    **Raises:**
+    - 400: Si el archivo no es válido (formato, tamaño)
+    - 500: Si falla el guardado del archivo
+    """
+    # Validar tipo de archivo
+    allowed_extensions = {".pdf", ".png", ".jpg", ".jpeg"}
+    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
+
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Formato de archivo no soportado: {file_ext}. Permitidos: {', '.join(allowed_extensions)}"
+        )
+
+    # Validar tamaño (máximo 10MB)
+    max_size = 10 * 1024 * 1024  # 10MB
+    file.file.seek(0, 2)  # Ir al final del archivo
+    file_size = file.file.tell()
+    file.file.seek(0)  # Volver al inicio
+
+    if file_size > max_size:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Archivo muy grande: {file_size / 1024 / 1024:.2f}MB. Máximo: 10MB"
+        )
+
+    # Crear directorio de uploads si no existe
+    upload_base = Path("uploads")
+    current_date = datetime.now()
+    upload_dir = upload_base / str(current_date.year) / f"{current_date.month:02d}"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generar nombre único
+    timestamp = current_date.strftime("%Y%m%d_%H%M%S")
+    safe_filename = f"invoice_{timestamp}{file_ext}"
+    file_path = upload_dir / safe_filename
+
+    # Guardar archivo
+    try:
+        async with aiofiles.open(file_path, 'wb') as f:
+            content = await file.read()
+            await f.write(content)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al guardar archivo: {str(e)}"
+        )
+
+    # Crear registro de Invoice con status PENDING
+    # Generamos un series temporal que luego será reemplazado por OCR
+    temp_series = f"TEMP-{timestamp}"
+
+    input_data = CreateInvoiceInput(
+        series=temp_series,
+        document_type="FACTURA",
+        issue_date=current_date.date().isoformat(),
+        issuer_tax_id="00000000000",  # Temporal, será llenado por OCR
+        issuer_name="PENDIENTE DE PROCESAMIENTO",
+        receiver_tax_id="00000000000",  # Temporal
+        receiver_name="PENDIENTE DE PROCESAMIENTO",
+        currency="PEN",  # Default, puede ser cambiado por OCR
+        file_path=str(file_path),
+        created_by=created_by,
+        notes=f"Archivo subido: {file.filename}"
+    )
+
+    use_case = CreateInvoiceUseCase(invoice_repo, company_repo)
+
+    try:
+        invoice = await use_case.execute(input_data)
+
+        return {
+            "invoice_id": invoice.id,
+            "file_path": str(file_path),
+            "status": invoice.status,
+            "message": f"Archivo subido exitosamente. Usar POST /invoices/{invoice.id}/process para procesar con OCR."
+        }
+    except ValueError as e:
+        # Si falla la creación, eliminar el archivo subido
+        if file_path.exists():
+            file_path.unlink()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/{invoice_id}/process")
+async def process_invoice_ocr(
+    invoice_id: int,
+    engine: Optional[str] = Query(None, description="Engine de OCR: donut, paddleocr, docling, tesseract"),
+    use_gpu: bool = Query(False, description="Usar aceleración GPU"),
+    force_reprocess: bool = Query(False, description="Forzar reprocesamiento si ya fue procesada"),
+    invoice_repo: InvoiceRepository = Depends(get_invoice_repository)
+) -> dict:
+    """
+    Procesa una factura con OCR (Donut Deep Learning por defecto).
+
+    **Parámetros:**
+    - `invoice_id`: ID de la factura
+    - `engine`: Motor de OCR (default: donut)
+      - `donut`: Document Understanding Transformer (recomendado, GPU acelerado)
+      - `paddleocr`: PaddleOCR (fallback)
+      - `docling`: Layout analysis
+      - `tesseract`: OCR tradicional
+    - `use_gpu`: Usar GPU para aceleración (recomendado para Donut)
+    - `force_reprocess`: Reprocesar aunque ya esté procesada
+
+    **Returns:**
+    ```json
+    {
+      "task_id": "abc123-def456",
+      "status": "PROCESSING",
+      "message": "Procesamiento OCR iniciado. Usar GET /tasks/{task_id} para consultar estado."
+    }
+    ```
+
+    **Notas:**
+    - El procesamiento es asíncrono (usa Celery)
+    - El estado de la factura cambia a PROCESSING
+    - Al completar, cambia a COMPLETED, REVIEW_NEEDED o ERROR según confidence
+    - Donut es el motor por defecto (Vision Transformer específico para facturas)
+
+    **Raises:**
+    - 404: Si la factura no existe
+    - 400: Si la factura no puede ser procesada
+    """
+    # Obtener factura
+    invoice = await invoice_repo.get_by_id(invoice_id)
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice with ID {invoice_id} not found"
+        )
+
+    # Validar que tenga archivo
+    if not invoice.file_path or not Path(invoice.file_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invoice file not found: {invoice.file_path}"
+        )
+
+    # Validar que pueda ser procesada
+    if invoice.status == "PROCESSING":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invoice is already being processed"
+        )
+
+    if invoice.status in ["APPROVED", "REJECTED"] and not force_reprocess:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invoice with status '{invoice.status}' cannot be reprocessed without force_reprocess=True"
+        )
+
+    # Crear input para Use Case
+    input_data = ProcessOCRInput(
+        invoice_id=invoice_id,
+        engine=engine,  # None usa Donut por defecto
+        force_reprocess=force_reprocess,
+        use_gpu=use_gpu
+    )
+
+    # Ejecutar Use Case (asíncrono)
+    use_case = ProcessOCRUseCase(invoice_repository=invoice_repo)
+
+    try:
+        # En producción, esto debería lanzar una tarea Celery y retornar task_id
+        # Por ahora, ejecutamos directamente
+        result = await use_case.execute(input_data)
+
+        # Simular task_id (en producción vendría de Celery)
+        task_id = f"task_{invoice_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        return {
+            "task_id": task_id,
+            "invoice_id": invoice_id,
+            "status": result.get("status", "PROCESSING"),
+            "confidence": result.get("confidence"),
+            "engine": engine or "donut",
+            "message": "Procesamiento OCR completado." if result.get("status") == "COMPLETED" else "Procesamiento OCR iniciado.",
+            "result": result
+        }
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en procesamiento OCR: {str(e)}"
+        )
+
+
+# ==============================================================================
+# ENDPOINTS - EXPORTACIÓN
+# ==============================================================================
+
+@router.post("/export/excel")
+async def export_invoices_to_excel(
+    invoice_ids: List[int] = Body(..., description="Lista de IDs de facturas a exportar"),
+    repository: InvoiceRepository = Depends(get_invoice_repository)
+) -> StreamingResponse:
+    """
+    Exporta facturas seleccionadas a formato Excel.
+
+    **Body:**
+    ```json
+    {
+      "invoice_ids": [1, 2, 3, 4, 5]
+    }
+    ```
+
+    **Returns:**
+    - Archivo Excel (.xlsx) para descarga
+
+    **Raises:**
+    - 400: Si no se proporcionan IDs o alguna factura no existe
+    """
+    if not invoice_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un invoice_id"
+        )
+
+    # Obtener facturas
+    invoices = []
+    for invoice_id in invoice_ids:
+        invoice = await repository.get_by_id(invoice_id)
+        if invoice:
+            invoices.append(invoice)
+
+    if not invoices:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No se encontraron facturas con los IDs proporcionados"
+        )
+
+    # Generar Excel
+    try:
+        # Por ahora, simulamos con CSV (en producción usar openpyxl o xlsxwriter)
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Headers
+        writer.writerow([
+            "ID", "Series", "Tipo", "Fecha Emisión", "Fecha Vencimiento",
+            "Emisor", "RUC Emisor", "Receptor", "RUC Receptor",
+            "Moneda", "Subtotal", "Impuestos", "Total", "Estado"
+        ])
+
+        # Datos
+        for invoice in invoices:
+            writer.writerow([
+                invoice.id,
+                invoice.series,
+                invoice.invoice_type,
+                invoice.issue_date,
+                invoice.due_date,
+                invoice.issuer.name if invoice.issuer else "",
+                invoice.issuer.tax_id if invoice.issuer else "",
+                invoice.receiver.name if invoice.receiver else "",
+                invoice.receiver.tax_id if invoice.receiver else "",
+                invoice.currency,
+                invoice.subtotal_amount,
+                invoice.tax_amount,
+                invoice.total_amount,
+                invoice.status
+            ])
+
+        # Convertir a bytes
+        output.seek(0)
+        content = output.getvalue().encode('utf-8')
+
+        # Retornar como descarga
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="text/csv",  # Cambiar a application/vnd.openxmlformats-officedocument.spreadsheetml.sheet para Excel real
+            headers={
+                "Content-Disposition": f"attachment; filename=facturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al generar archivo: {str(e)}"
+        )
+
+
+@router.post("/export/csv")
+async def export_invoices_to_csv(
+    invoice_ids: List[int] = Body(..., description="Lista de IDs de facturas a exportar"),
+    repository: InvoiceRepository = Depends(get_invoice_repository)
+) -> StreamingResponse:
+    """
+    Exporta facturas seleccionadas a formato CSV.
+
+    **Body:**
+    ```json
+    {
+      "invoice_ids": [1, 2, 3, 4, 5]
+    }
+    ```
+
+    **Returns:**
+    - Archivo CSV para descarga
+
+    **Raises:**
+    - 400: Si no se proporcionan IDs o alguna factura no existe
+    """
+    if not invoice_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un invoice_id"
+        )
+
+    # Obtener facturas
+    invoices = []
+    for invoice_id in invoice_ids:
+        invoice = await repository.get_by_id(invoice_id)
+        if invoice:
+            invoices.append(invoice)
+
+    if not invoices:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No se encontraron facturas con los IDs proporcionados"
+        )
+
+    # Generar CSV
+    try:
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Headers
+        writer.writerow([
+            "ID", "Series", "Tipo", "Fecha Emisión", "Fecha Vencimiento",
+            "Emisor", "RUC Emisor", "Receptor", "RUC Receptor",
+            "Moneda", "Subtotal", "Impuestos", "Total", "Estado",
+            "Confianza OCR", "Fecha Creación", "Notas"
+        ])
+
+        # Datos
+        for invoice in invoices:
+            writer.writerow([
+                invoice.id,
+                invoice.series,
+                invoice.invoice_type,
+                invoice.issue_date,
+                invoice.due_date,
+                invoice.issuer.name if invoice.issuer else "",
+                invoice.issuer.tax_id if invoice.issuer else "",
+                invoice.receiver.name if invoice.receiver else "",
+                invoice.receiver.tax_id if invoice.receiver else "",
+                invoice.currency,
+                invoice.subtotal_amount,
+                invoice.tax_amount,
+                invoice.total_amount,
+                invoice.status,
+                invoice.ocr_confidence if hasattr(invoice, 'ocr_confidence') else "",
+                invoice.created_at,
+                invoice.notes or ""
+            ])
+
+        # Convertir a bytes
+        output.seek(0)
+        content = output.getvalue().encode('utf-8')
+
+        # Retornar como descarga
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=facturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al generar CSV: {str(e)}"
+        )
+
+
+# ==============================================================================
+# ENDPOINTS - BATCH OPERATIONS
+# ==============================================================================
+
+@router.post("/batch/approve")
+async def batch_approve_invoices(
+    invoice_ids: List[int] = Body(..., description="Lista de IDs de facturas a aprobar"),
+    approved_by: str = Body(..., description="Email del usuario que aprueba"),
+    repository: InvoiceRepository = Depends(get_invoice_repository)
+) -> dict:
+    """
+    Aprueba múltiples facturas en lote.
+
+    **Body:**
+    ```json
+    {
+      "invoice_ids": [1, 2, 3, 4, 5],
+      "approved_by": "admin@invokox.com"
+    }
+    ```
+
+    **Returns:**
+    ```json
+    {
+      "success_count": 3,
+      "failed_count": 2,
+      "approved_ids": [1, 2, 3],
+      "failed_ids": [
+        {"id": 4, "reason": "Already approved"},
+        {"id": 5, "reason": "Invalid status"}
+      ]
+    }
+    ```
+    """
+    if not invoice_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un invoice_id"
+        )
+
+    approved_ids = []
+    failed_ids = []
+
+    for invoice_id in invoice_ids:
+        try:
+            invoice = await repository.get_by_id(invoice_id)
+            if not invoice:
+                failed_ids.append({
+                    "id": invoice_id,
+                    "reason": "Invoice not found"
+                })
+                continue
+
+            invoice.approve(approved_by)
+            await repository.update(invoice)
+            approved_ids.append(invoice_id)
+
+        except ValueError as e:
+            failed_ids.append({
+                "id": invoice_id,
+                "reason": str(e)
+            })
+        except Exception as e:
+            failed_ids.append({
+                "id": invoice_id,
+                "reason": f"Unexpected error: {str(e)}"
+            })
+
+    return {
+        "success_count": len(approved_ids),
+        "failed_count": len(failed_ids),
+        "approved_ids": approved_ids,
+        "failed_ids": failed_ids
+    }
+
+
+@router.post("/batch/reject")
+async def batch_reject_invoices(
+    invoice_ids: List[int] = Body(..., description="Lista de IDs de facturas a rechazar"),
+    rejected_by: str = Body(..., description="Email del usuario que rechaza"),
+    reason: Optional[str] = Body(None, description="Razón del rechazo"),
+    repository: InvoiceRepository = Depends(get_invoice_repository)
+) -> dict:
+    """
+    Rechaza múltiples facturas en lote.
+
+    **Body:**
+    ```json
+    {
+      "invoice_ids": [1, 2, 3],
+      "rejected_by": "admin@invokox.com",
+      "reason": "Datos incorrectos"
+    }
+    ```
+
+    **Returns:**
+    ```json
+    {
+      "success_count": 2,
+      "failed_count": 1,
+      "rejected_ids": [1, 2],
+      "failed_ids": [{"id": 3, "reason": "..."}]
+    }
+    ```
+    """
+    if not invoice_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un invoice_id"
+        )
+
+    rejected_ids = []
+    failed_ids = []
+
+    for invoice_id in invoice_ids:
+        try:
+            invoice = await repository.get_by_id(invoice_id)
+            if not invoice:
+                failed_ids.append({
+                    "id": invoice_id,
+                    "reason": "Invoice not found"
+                })
+                continue
+
+            invoice.reject(rejected_by, reason)
+            await repository.update(invoice)
+            rejected_ids.append(invoice_id)
+
+        except ValueError as e:
+            failed_ids.append({
+                "id": invoice_id,
+                "reason": str(e)
+            })
+        except Exception as e:
+            failed_ids.append({
+                "id": invoice_id,
+                "reason": f"Unexpected error: {str(e)}"
+            })
+
+    return {
+        "success_count": len(rejected_ids),
+        "failed_count": len(failed_ids),
+        "rejected_ids": rejected_ids,
+        "failed_ids": failed_ids
     }

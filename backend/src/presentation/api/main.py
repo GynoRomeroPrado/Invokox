@@ -18,7 +18,7 @@ from src.infrastructure.database.config import (
     check_db_connection,
     get_db_info
 )
-from src.presentation.api.v1 import invoices, companies, health
+from src.presentation.api.v1 import invoices, companies, health, tasks
 
 # Configurar logging
 logging.basicConfig(
@@ -234,6 +234,12 @@ app.include_router(
     companies.router,
     prefix=settings.api_v1_prefix,
     tags=["Companies"]
+)
+
+app.include_router(
+    tasks.router,
+    prefix=settings.api_v1_prefix,
+    tags=["Tasks"]
 )
 
 
