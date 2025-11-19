@@ -1,0 +1,300 @@
+version: '3.8'
+
+# ==============================================================================
+# DOCKER COMPOSE - INVOKOX V2.0
+# ==============================================================================
+# Entorno de desarrollo completo con todos los servicios necesarios:
+# - Redis: Message broker para Celery
+# - PostgreSQL: Base de datos para testing (simula SQL Server)
+# - Backend: API FastAPI
+# - Frontend: React + Vite (dev server)
+# - Celery Worker: Procesamiento asíncrono (OCR, emails)
+# ==============================================================================
+
+services:
+  # ============================================================================
+  # REDIS - Message Broker & Cache
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: invokox-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - invokox-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # POSTGRESQL - Base de datos para desarrollo/testing
+  # ============================================================================
+  # Simula el comportamiento de SQL Server para testing de migraciones
+  postgres:
+    image: postgres:15-alpine
+    container_name: invokox-postgres
+    environment:
+      POSTGRES_DB: invokox_db
+      POSTGRES_USER: invokox_user
+      POSTGRES_PASSWORD: invokox_password_dev_2024
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=es_ES.UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invokox_user -d invokox_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - invokox-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # SQL SERVER - Base de datos para producción (opcional)
+  # ============================================================================
+  # Descomentar si necesitas probar con SQL Server real
+  # sqlserver:
+  #   image: mcr.microsoft.com/mssql/server:2022-latest
+  #   container_name: invokox-sqlserver
+  #   environment:
+  #     ACCEPT_EULA: "Y"
+  #     SA_PASSWORD: "YourStrong!Passw0rd"
+  #     MSSQL_PID: "Developer"
+  #     MSSQL_COLLATION: "Modern_Spanish_CI_AS"
+  #   ports:
+  #     - "1433:1433"
+  #   volumes:
+  #     - sqlserver_data:/var/opt/mssql
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P YourStrong!Passw0rd -Q 'SELECT 1' || exit 1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 10
+  #   networks:
+  #     - invokox-network
+  #   restart: unless-stopped
+
+  # ============================================================================
+  # BACKEND - FastAPI Application
+  # ============================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: invokox-backend
+    environment:
+      # Application
+      MODE: "server"
+      ENVIRONMENT: "development"
+      DEBUG: "true"
+
+      # Database - PostgreSQL (cambiar a sqlserver si usas SQL Server)
+      DATABASE_URL: "postgresql://invokox_user:invokox_password_dev_2024@postgres:5432/invokox_db"
+      # DATABASE_URL: "mssql+pyodbc://sa:YourStrong!Passw0rd@sqlserver:1433/invokox_db?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+
+      # Redis
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+
+      # Security
+      SECRET_KEY: "dev-secret-key-change-in-production-min-32-chars-long"
+
+      # OCR
+      OCR_ENGINE: "paddleocr"
+      USE_GPU: "false"
+
+      # CORS
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000","http://frontend:5173"]'
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./data/uploads:/app/data/uploads
+      - ./models:/app/models
+      - backend_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - invokox-network
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo '🚀 Waiting for database...' &&
+        sleep 5 &&
+        echo '📦 Running migrations...' &&
+        alembic upgrade head &&
+        echo '🌟 Starting FastAPI server...' &&
+        uvicorn src.presentation.api.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  # ============================================================================
+  # CELERY WORKER - Procesamiento Asíncrono
+  # ============================================================================
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: invokox-celery-worker
+    environment:
+      # Application
+      MODE: "server"
+      ENVIRONMENT: "development"
+
+      # Database
+      DATABASE_URL: "postgresql://invokox_user:invokox_password_dev_2024@postgres:5432/invokox_db"
+
+      # Redis
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+
+      # OCR
+      OCR_ENGINE: "paddleocr"
+      USE_GPU: "false"
+    volumes:
+      - ./backend:/app
+      - ./data/uploads:/app/data/uploads
+      - ./models:/app/models
+      - celery_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    networks:
+      - invokox-network
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo '⏳ Waiting for backend to be ready...' &&
+        sleep 10 &&
+        echo '🔄 Starting Celery worker...' &&
+        celery -A src.workers.celery_app worker --loglevel=info --concurrency=2
+      "
+
+  # ============================================================================
+  # CELERY BEAT - Scheduler para tareas periódicas
+  # ============================================================================
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: invokox-celery-beat
+    environment:
+      MODE: "server"
+      ENVIRONMENT: "development"
+      DATABASE_URL: "postgresql://invokox_user:invokox_password_dev_2024@postgres:5432/invokox_db"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+    volumes:
+      - ./backend:/app
+      - celery_beat_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    networks:
+      - invokox-network
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo '⏳ Waiting for celery worker...' &&
+        sleep 15 &&
+        echo '⏰ Starting Celery beat scheduler...' &&
+        celery -A src.workers.celery_app beat --loglevel=info
+      "
+
+  # ============================================================================
+  # FLOWER - Celery Monitoring Dashboard
+  # ============================================================================
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: invokox-flower
+    environment:
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+      FLOWER_PORT: "5555"
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    networks:
+      - invokox-network
+    restart: unless-stopped
+    command: celery -A src.workers.celery_app flower --port=5555
+
+  # ============================================================================
+  # FRONTEND - React + Vite Development Server
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: invokox-frontend
+    environment:
+      VITE_API_URL: "http://localhost:8000/api/v1"
+      VITE_MODE: "development"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules  # Named volume para node_modules
+    depends_on:
+      - backend
+    networks:
+      - invokox-network
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0
+
+# ==============================================================================
+# NETWORKS
+# ==============================================================================
+networks:
+  invokox-network:
+    driver: bridge
+    name: invokox-network
+
+# ==============================================================================
+# VOLUMES
+# ==============================================================================
+volumes:
+  redis_data:
+    name: invokox-redis-data
+  postgres_data:
+    name: invokox-postgres-data
+  # sqlserver_data:
+  #   name: invokox-sqlserver-data
+  backend_logs:
+    name: invokox-backend-logs
+  celery_logs:
+    name: invokox-celery-logs
+  celery_beat_logs:
+    name: invokox-celery-beat-logs

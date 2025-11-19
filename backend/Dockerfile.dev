@@ -1,0 +1,72 @@
+# ==============================================================================
+# DOCKERFILE - BACKEND DEVELOPMENT
+# ==============================================================================
+# Imagen para desarrollo del backend FastAPI con hot-reload
+# ==============================================================================
+
+FROM python:3.11-slim
+
+# Metadatos
+LABEL maintainer="Invokox Team"
+LABEL description="Backend FastAPI - Development Environment"
+
+# Variables de entorno
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    POETRY_VERSION=1.7.1 \
+    POETRY_HOME="/opt/poetry" \
+    POETRY_NO_INTERACTION=1 \
+    POETRY_VIRTUALENVS_CREATE=false
+
+# Agregar Poetry al PATH
+ENV PATH="$POETRY_HOME/bin:$PATH"
+
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    libpq-dev \
+    # Para SQL Server (opcional)
+    unixodbc \
+    unixodbc-dev \
+    # Para OCR
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    # Utilidades
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Instalar Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 -
+
+# Crear directorio de trabajo
+WORKDIR /app
+
+# Copiar archivos de dependencias
+COPY pyproject.toml poetry.lock* ./
+
+# Instalar dependencias
+RUN poetry install --no-root --no-dev
+
+# Copiar código fuente
+COPY . .
+
+# Crear directorios necesarios
+RUN mkdir -p /app/data/uploads /app/logs /app/models
+
+# Exponer puerto
+EXPOSE 8000
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+
+# Comando por defecto (se sobrescribe en docker-compose.yml)
+CMD ["uvicorn", "src.presentation.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

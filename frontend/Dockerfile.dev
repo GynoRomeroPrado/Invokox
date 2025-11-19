@@ -1,0 +1,41 @@
+# ==============================================================================
+# DOCKERFILE - FRONTEND DEVELOPMENT
+# ==============================================================================
+# Imagen para desarrollo del frontend React + Vite con hot-reload
+# ==============================================================================
+
+FROM node:20-alpine
+
+# Metadatos
+LABEL maintainer="Invokox Team"
+LABEL description="Frontend React + Vite - Development Environment"
+
+# Variables de entorno
+ENV NODE_ENV=development
+
+# Instalar dependencias del sistema
+RUN apk add --no-cache \
+    git \
+    curl
+
+# Crear directorio de trabajo
+WORKDIR /app
+
+# Copiar archivos de dependencias
+COPY package.json package-lock.json* ./
+
+# Instalar dependencias
+RUN npm ci
+
+# Copiar código fuente
+COPY . .
+
+# Exponer puerto de Vite
+EXPOSE 5173
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:5173 || exit 1
+
+# Comando por defecto
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
