@@ -12,6 +12,8 @@ import { OcrSettings } from './components/OcrSettings';
 import { ServerSync } from './components/ServerSync';
 import { UsersRoles } from './components/UsersRoles';
 import { Help } from './components/Help';
+import { LanguageSelector } from './components/LanguageSelector';
+import { useLanguage } from './i18n';
 import {
   LayoutDashboard,
   FileText,
@@ -51,6 +53,8 @@ export type View =
   | 'help';
 
 export default function App() {
+  const { t } = useLanguage();
+
   // Usuario por defecto para desarrollo (sin login)
   const [user] = useState<User>({
     id: '1',
@@ -74,7 +78,10 @@ export default function App() {
       {/* Sidebar Navigation */}
       <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
         <div className="p-4 border-b border-gray-200">
-          <h1 className="text-xl font-bold text-blue-600">Invokox</h1>
+          <div className="flex items-center justify-between mb-2">
+            <h1 className="text-xl font-bold text-blue-600">Invokox</h1>
+            <LanguageSelector />
+          </div>
           <p className="text-sm text-gray-600 mt-1">Sistema de Facturas OCR</p>
           <div className="mt-3 pt-3 border-t border-gray-100">
             <p className="text-sm font-medium text-gray-900">{user.name}</p>
@@ -85,65 +92,65 @@ export default function App() {
         <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
           <NavItem
             icon={LayoutDashboard}
-            label="Panel Principal"
+            label={t.nav.dashboard}
             active={currentView === 'dashboard'}
             onClick={() => navigateTo('dashboard')}
           />
           <NavItem
             icon={FileText}
-            label="Facturas"
+            label={t.nav.invoices}
             active={currentView === 'invoices'}
             onClick={() => navigateTo('invoices')}
           />
           <NavItem
             icon={Upload}
-            label="Cargar Facturas"
+            label={t.nav.upload}
             active={currentView === 'upload'}
             onClick={() => navigateTo('upload')}
           />
           <NavItem
             icon={Building2}
-            label="Empresas"
+            label={t.nav.companies}
             active={currentView === 'companies'}
             onClick={() => navigateTo('companies')}
           />
           <NavItem
             icon={BarChart3}
-            label="Analytics"
+            label={t.nav.analytics}
             active={currentView === 'analytics'}
             onClick={() => navigateTo('analytics')}
           />
           <NavItem
             icon={Download}
-            label="Exportación"
+            label={t.nav.export}
             active={currentView === 'export'}
             onClick={() => navigateTo('export')}
           />
 
           <div className="pt-4 mt-4 border-t border-gray-200">
-            <p className="text-gray-500 text-xs font-semibold px-3 mb-2 uppercase tracking-wide">Configuración</p>
+            <p className="text-gray-500 text-xs font-semibold px-3 mb-2 uppercase tracking-wide">{t.settings.title}</p>
             <NavItem
               icon={Settings}
-              label="General"
+              label={t.settings.general}
               active={currentView === 'settings'}
               onClick={() => navigateTo('settings')}
             />
             <NavItem
               icon={ScanLine}
-              label="OCR Avanzado"
+              label={t.settings.ocr}
               active={currentView === 'ocr-settings'}
               onClick={() => navigateTo('ocr-settings')}
             />
             <NavItem
               icon={Server}
-              label="Servidor"
+              label={t.settings.sync}
               active={currentView === 'server'}
               onClick={() => navigateTo('server')}
             />
             {user.role === 'admin' && (
               <NavItem
                 icon={Users}
-                label="Usuarios y Roles"
+                label={t.settings.users}
                 active={currentView === 'users'}
                 onClick={() => navigateTo('users')}
               />
@@ -153,7 +160,7 @@ export default function App() {
           <div className="pt-4 mt-4 border-t border-gray-200">
             <NavItem
               icon={HelpCircle}
-              label="Ayuda y Soporte"
+              label={t.nav.help}
               active={currentView === 'help'}
               onClick={() => navigateTo('help')}
             />

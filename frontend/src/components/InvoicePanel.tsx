@@ -5,6 +5,7 @@ import { Search, Filter, Download, Trash2, CheckCircle, XCircle, Eye, Edit, Chev
 import { useInvoiceStore } from '../store/invoiceStore';
 import { toast } from 'sonner';
 import { invoicesApi } from '../services/invoices';
+import { useLanguage } from '../i18n';
 
 interface InvoicePanelProps {
   navigateTo: (view: View, invoiceId?: string) => void;
@@ -12,6 +13,7 @@ interface InvoicePanelProps {
 }
 
 export function InvoicePanel({ navigateTo, userRole }: InvoicePanelProps) {
+  const { t } = useLanguage();
   const [searchText, setSearchText] = useState('');
   const [statusFilter, setStatusFilter] = useState<InvoiceStatus | 'ALL'>('ALL');
   const [currencyFilter, setCurrencyFilter] = useState<Currency | 'ALL'>('ALL');
