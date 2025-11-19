@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { View, UserRole } from '../App';
-import { mockInvoices } from '../data/mockData';
-import { InvoiceItem, Payment } from '../types/invoice';
-import { Save, CheckCircle, XCircle, AlertCircle, Plus, Trash2, ZoomIn, ZoomOut, RotateCw } from 'lucide-react';
+import { InvoiceItem, Payment, Invoice } from '../types/invoice';
+import { Save, CheckCircle, XCircle, AlertCircle, Plus, Trash2, ZoomIn, ZoomOut, RotateCw, FileText, Loader2 } from 'lucide-react';
+import { useInvoiceStore } from '../store/invoiceStore';
+import { toast } from 'sonner';
+import { invoicesApi } from '../services/invoices';
 
 interface ValidateInvoiceProps {
   invoiceId: string;
@@ -11,24 +13,81 @@ interface ValidateInvoiceProps {
 }
 
 export function ValidateInvoice({ invoiceId, navigateTo, userRole }: ValidateInvoiceProps) {
-  const originalInvoice = mockInvoices.find(inv => inv.id === invoiceId);
-  
-  if (!originalInvoice) {
-    return <div className="p-8">Factura no encontrada</div>;
+  const store = useInvoiceStore();
+  const [originalInvoice, setOriginalInvoice] = useState<Invoice | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const [series, setSeries] = useState('');
+  const [issueDate, setIssueDate] = useState('');
+  const [dueDate, setDueDate] = useState('');
+  const [issuerName, setIssuerName] = useState('');
+  const [issuerTaxId, setIssuerTaxId] = useState('');
+  const [receiverName, setReceiverName] = useState('');
+  const [receiverTaxId, setReceiverTaxId] = useState('');
+  const [currency, setCurrency] = useState<'USD' | 'PEN' | 'EUR' | 'CLP' | 'MXN'>('PEN');
+  const [notes, setNotes] = useState('');
+  const [items, setItems] = useState<InvoiceItem[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [zoom, setZoom] = useState(100);
+
+  // Load invoice from API
+  useEffect(() => {
+    const loadInvoice = async () => {
+      try {
+        setLoading(true);
+        const numericId = typeof invoiceId === 'string' ? parseInt(invoiceId, 10) : invoiceId;
+        const invoice = await invoicesApi.getById(numericId);
+
+        setOriginalInvoice(invoice);
+        setSeries(invoice.series);
+        setIssueDate(invoice.issue_date);
+        setDueDate(invoice.due_date || '');
+        setIssuerName(invoice.issuer_name);
+        setIssuerTaxId(invoice.issuer_tax_id);
+        setReceiverName(invoice.receiver_name);
+        setReceiverTaxId(invoice.receiver_tax_id);
+        setCurrency(invoice.currency);
+        setNotes(invoice.notes || '');
+        setItems(invoice.items || []);
+        setPayments(invoice.payments || []);
+      } catch (error: any) {
+        toast.error(`Error al cargar factura: ${error.message}`);
+        navigateTo('invoices');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadInvoice();
+  }, [invoiceId]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 text-blue-600 animate-spin mx-auto mb-4" />
+          <p className="text-gray-600">Cargando factura...</p>
+        </div>
+      </div>
+    );
   }
 
-  const [series, setSeries] = useState(originalInvoice.series);
-  const [issueDate, setIssueDate] = useState(originalInvoice.issue_date);
-  const [dueDate, setDueDate] = useState(originalInvoice.due_date || '');
-  const [issuerName, setIssuerName] = useState(originalInvoice.issuer_name);
-  const [issuerTaxId, setIssuerTaxId] = useState(originalInvoice.issuer_tax_id);
-  const [receiverName, setReceiverName] = useState(originalInvoice.receiver_name);
-  const [receiverTaxId, setReceiverTaxId] = useState(originalInvoice.receiver_tax_id);
-  const [currency, setCurrency] = useState(originalInvoice.currency);
-  const [notes, setNotes] = useState(originalInvoice.notes || '');
-  const [items, setItems] = useState<InvoiceItem[]>(originalInvoice.items);
-  const [payments, setPayments] = useState<Payment[]>(originalInvoice.payments);
-  const [zoom, setZoom] = useState(100);
+  if (!originalInvoice) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center">
+          <AlertCircle className="w-12 h-12 text-red-600 mx-auto mb-4" />
+          <p className="text-gray-900 mb-2">Factura no encontrada</p>
+          <button
+            onClick={() => navigateTo('invoices')}
+            className="text-blue-600 hover:text-blue-700"
+          >
+            Volver al panel de facturas
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const addItem = () => {
     setItems([...items, {
@@ -98,37 +157,90 @@ export function ValidateInvoice({ invoiceId, navigateTo, userRole }: ValidateInv
 
   const { subtotal, taxTotal, total } = calculateTotals();
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (items.length === 0) {
-      alert('Debe haber al menos un ítem en la factura');
+      toast.error('Debe haber al menos un ítem en la factura');
       return;
     }
-    alert('Factura guardada');
-    navigateTo('invoices');
-  };
 
-  const handleApprove = () => {
-    if (userRole === 'viewer') {
-      alert('No tienes permisos para aprobar facturas');
-      return;
-    }
-    if (items.length === 0) {
-      alert('Debe haber al menos un ítem en la factura');
-      return;
-    }
-    alert('Factura aprobada');
-    navigateTo('invoices');
-  };
+    try {
+      const numericId = typeof invoiceId === 'string' ? parseInt(invoiceId, 10) : invoiceId;
 
-  const handleReject = () => {
-    if (userRole === 'viewer') {
-      alert('No tienes permisos para rechazar facturas');
-      return;
-    }
-    const reason = prompt('Motivo del rechazo:');
-    if (reason) {
-      alert('Factura rechazada');
+      // Build update data
+      const updateData = {
+        series,
+        issue_date: issueDate,
+        due_date: dueDate || undefined,
+        issuer_name: issuerName,
+        issuer_tax_id: issuerTaxId,
+        receiver_name: receiverName,
+        receiver_tax_id: receiverTaxId,
+        currency,
+        notes: notes || undefined,
+        items,
+        payments,
+        subtotal,
+        tax_total: taxTotal,
+        total,
+      };
+
+      await invoicesApi.update(numericId, updateData);
+      toast.success('Factura guardada exitosamente');
+
+      // Reload data in store
+      await store.loadInvoices();
+
       navigateTo('invoices');
+    } catch (error: any) {
+      toast.error(`Error al guardar factura: ${error.message}`);
+    }
+  };
+
+  const handleApprove = async () => {
+    if (userRole === 'viewer') {
+      toast.error('No tienes permisos para aprobar facturas');
+      return;
+    }
+
+    if (items.length === 0) {
+      toast.error('Debe haber al menos un ítem en la factura');
+      return;
+    }
+
+    try {
+      const numericId = typeof invoiceId === 'string' ? parseInt(invoiceId, 10) : invoiceId;
+
+      // Save changes first
+      await handleSave();
+
+      // Then approve
+      await store.approveInvoice(String(numericId), 'admin@invokox.com');
+
+      toast.success('Factura aprobada exitosamente');
+      navigateTo('invoices');
+    } catch (error: any) {
+      toast.error(`Error al aprobar factura: ${error.message}`);
+    }
+  };
+
+  const handleReject = async () => {
+    if (userRole === 'viewer') {
+      toast.error('No tienes permisos para rechazar facturas');
+      return;
+    }
+
+    const reason = prompt('Motivo del rechazo:');
+    if (!reason) return; // User cancelled
+
+    try {
+      const numericId = typeof invoiceId === 'string' ? parseInt(invoiceId, 10) : invoiceId;
+
+      await store.rejectInvoice(String(numericId), 'admin@invokox.com', reason);
+
+      toast.success('Factura rechazada');
+      navigateTo('invoices');
+    } catch (error: any) {
+      toast.error(`Error al rechazar factura: ${error.message}`);
     }
   };
 

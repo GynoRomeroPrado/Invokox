@@ -110,4 +110,23 @@ export const invoicesApi = {
     );
     return response.data;
   },
+
+  // Batch approve - Aprobar múltiples facturas
+  batchApprove: async (invoiceIds: number[], approvedBy: string) => {
+    const response = await api.post('/api/v1/invoices/batch/approve', {
+      invoice_ids: invoiceIds,
+      approved_by: approvedBy
+    });
+    return response.data;
+  },
+
+  // Batch reject - Rechazar múltiples facturas
+  batchReject: async (invoiceIds: number[], rejectedBy: string, reason?: string) => {
+    const response = await api.post('/api/v1/invoices/batch/reject', {
+      invoice_ids: invoiceIds,
+      rejected_by: rejectedBy,
+      reason
+    });
+    return response.data;
+  },
 };

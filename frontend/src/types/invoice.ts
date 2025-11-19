@@ -1,10 +1,10 @@
 export type InvoiceStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'APPROVED' | 'REJECTED' | 'ERROR';
 export type Currency = 'USD' | 'PEN' | 'EUR' | 'CLP' | 'MXN';
 export type CompanyType = 'EMISOR' | 'RECEPTOR' | 'AMBOS';
-export type OcrEngine = 'PaddleOCR' | 'Docling' | 'Tesseract';
+export type OcrEngine = 'Donut' | 'PaddleOCR' | 'Docling' | 'Tesseract';
 
 export interface Company {
-  id: string;
+  id: string | number;  // Backend uses number, allow both for transition
   tax_id: string;
   name: string;
   commercial_name?: string;
@@ -18,7 +18,7 @@ export interface Company {
 }
 
 export interface InvoiceItem {
-  id: string;
+  id: string | number;  // Backend uses number, allow both for transition
   description: string;
   quantity: number;
   unit_price: number;
@@ -34,20 +34,20 @@ export interface Payment {
 }
 
 export interface Invoice {
-  id: string;
+  id: string | number;  // Backend uses number, allow both for transition
   series: string;
   issue_date: string;
   due_date?: string;
-  issuer_id: string;
+  issuer_id: string | number;  // Backend uses number
   issuer_name: string;
   issuer_tax_id: string;
-  receiver_id: string;
+  receiver_id: string | number;  // Backend uses number
   receiver_name: string;
   receiver_tax_id: string;
   currency: Currency;
   status: InvoiceStatus;
   ocr_confidence: number;
-  ocr_engine: OcrEngine;
+  ocr_engine?: OcrEngine;  // Optional since it may be null before OCR
   processing_time?: number;
   file_path: string;
   subtotal: number;
@@ -57,16 +57,16 @@ export interface Invoice {
   total: number;
   notes?: string;
   items: InvoiceItem[];
-  payments: Payment[];
+  payments?: Payment[];  // Optional since it may not be present
   created_at: string;
-  updated_at: string;
+  updated_at?: string;  // Optional
   created_by: string;
   updated_by?: string;
 }
 
 export interface AuditLog {
-  id: string;
-  invoice_id: string;
+  id: string | number;  // Backend uses number, allow both for transition
+  invoice_id: string | number;  // Backend uses number
   user_id: string;
   user_name: string;
   action: string;

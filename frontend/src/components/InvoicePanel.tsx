@@ -1,8 +1,10 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { View, UserRole } from '../App';
-import { mockInvoices } from '../data/mockData';
 import { Invoice, InvoiceStatus, Currency } from '../types/invoice';
-import { Search, Filter, Download, Trash2, CheckCircle, XCircle, Eye, Edit, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, Filter, Download, Trash2, CheckCircle, XCircle, Eye, Edit, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import { useInvoiceStore } from '../store/invoiceStore';
+import { toast } from 'sonner';
+import { invoicesApi } from '../services/invoices';
 
 interface InvoicePanelProps {
   navigateTo: (view: View, invoiceId?: string) => void;
@@ -19,22 +21,38 @@ export function InvoicePanel({ navigateTo, userRole }: InvoicePanelProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
+  // Get store state and actions
+  const store = useInvoiceStore();
+  const { invoices, loading, error } = store;
+
+  // Load invoices on mount
+  useEffect(() => {
+    store.loadInvoices();
+  }, []);
+
+  // Show error toast if loading fails
+  useEffect(() => {
+    if (error) {
+      toast.error(`Error al cargar facturas: ${error}`);
+    }
+  }, [error]);
+
   const filteredInvoices = useMemo(() => {
-    return mockInvoices.filter(invoice => {
-      const matchesSearch = !searchText || 
+    return invoices.filter(invoice => {
+      const matchesSearch = !searchText ||
         invoice.series.toLowerCase().includes(searchText.toLowerCase()) ||
         invoice.issuer_name.toLowerCase().includes(searchText.toLowerCase()) ||
         invoice.receiver_name.toLowerCase().includes(searchText.toLowerCase());
-      
+
       const matchesStatus = statusFilter === 'ALL' || invoice.status === statusFilter;
       const matchesCurrency = currencyFilter === 'ALL' || invoice.currency === currencyFilter;
-      
+
       const matchesDateFrom = !dateFrom || invoice.issue_date >= dateFrom;
       const matchesDateTo = !dateTo || invoice.issue_date <= dateTo;
 
       return matchesSearch && matchesStatus && matchesCurrency && matchesDateFrom && matchesDateTo;
     });
-  }, [searchText, statusFilter, currencyFilter, dateFrom, dateTo]);
+  }, [invoices, searchText, statusFilter, currencyFilter, dateFrom, dateTo]);
 
   const totalPages = Math.ceil(filteredInvoices.length / itemsPerPage);
   const paginatedInvoices = filteredInvoices.slice(
@@ -60,33 +78,111 @@ export function InvoicePanel({ navigateTo, userRole }: InvoicePanelProps) {
     }
   };
 
-  const handleBulkApprove = () => {
+  const handleBulkApprove = async () => {
     if (userRole === 'viewer') {
-      alert('No tienes permisos para aprobar facturas');
+      toast.error('No tienes permisos para aprobar facturas');
       return;
     }
-    alert(`Aprobar ${selectedIds.size} facturas seleccionadas`);
-    setSelectedIds(new Set());
+
+    try {
+      // Convert IDs to numbers (backend expects integers)
+      const invoiceIds = Array.from(selectedIds).map(id =>
+        typeof id === 'string' ? parseInt(id, 10) : id
+      );
+
+      const result = await store.batchApprove(invoiceIds, 'admin@invokox.com');
+
+      toast.success(`${result.success_count} factura(s) aprobada(s)`);
+
+      if (result.failed_count > 0) {
+        toast.warning(`${result.failed_count} factura(s) no pudieron aprobarse`);
+      }
+
+      setSelectedIds(new Set());
+      await store.loadInvoices(); // Reload to get updated data
+    } catch (error: any) {
+      toast.error(`Error al aprobar facturas: ${error.message}`);
+    }
   };
 
-  const handleBulkReject = () => {
+  const handleBulkReject = async () => {
     if (userRole === 'viewer') {
-      alert('No tienes permisos para rechazar facturas');
+      toast.error('No tienes permisos para rechazar facturas');
       return;
     }
-    alert(`Rechazar ${selectedIds.size} facturas seleccionadas`);
-    setSelectedIds(new Set());
+
+    const reason = prompt('Motivo del rechazo (opcional):');
+    if (reason === null) return; // User cancelled
+
+    try {
+      // Convert IDs to numbers (backend expects integers)
+      const invoiceIds = Array.from(selectedIds).map(id =>
+        typeof id === 'string' ? parseInt(id, 10) : id
+      );
+
+      const result = await store.batchReject(invoiceIds, 'admin@invokox.com', reason || undefined);
+
+      toast.success(`${result.success_count} factura(s) rechazada(s)`);
+
+      if (result.failed_count > 0) {
+        toast.warning(`${result.failed_count} factura(s) no pudieron rechazarse`);
+      }
+
+      setSelectedIds(new Set());
+      await store.loadInvoices(); // Reload to get updated data
+    } catch (error: any) {
+      toast.error(`Error al rechazar facturas: ${error.message}`);
+    }
   };
 
-  const handleBulkExport = () => {
-    alert(`Exportar ${selectedIds.size} facturas seleccionadas`);
+  const handleBulkExport = async () => {
+    try {
+      // Convert IDs to numbers (backend expects integers)
+      const invoiceIds = Array.from(selectedIds).map(id =>
+        typeof id === 'string' ? parseInt(id, 10) : id
+      );
+
+      // Export to Excel by default
+      toast.info('Generando archivo Excel...');
+      await invoicesApi.exportToExcel(invoiceIds);
+
+      toast.success(`${invoiceIds.length} factura(s) exportada(s) a Excel`);
+    } catch (error: any) {
+      toast.error(`Error al exportar facturas: ${error.message}`);
+    }
   };
 
   const handleView = (invoice: Invoice) => {
+    const invoiceId = String(invoice.id); // Convert to string for navigation
     if (invoice.status === 'APPROVED' || invoice.status === 'REJECTED') {
-      navigateTo('view', invoice.id);
+      navigateTo('view', invoiceId);
     } else {
-      navigateTo('validate', invoice.id);
+      navigateTo('validate', invoiceId);
+    }
+  };
+
+  const handleDownload = async (invoice: Invoice) => {
+    try {
+      // Download the original invoice file
+      const response = await fetch(`http://localhost:8000${invoice.file_path}`);
+
+      if (!response.ok) {
+        throw new Error('No se pudo descargar el archivo');
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${invoice.series}.${invoice.file_path.split('.').pop()}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      toast.success('Archivo descargado');
+    } catch (error: any) {
+      toast.error(`Error al descargar: ${error.message}`);
     }
   };
 
@@ -96,6 +192,14 @@ export function InvoicePanel({ navigateTo, userRole }: InvoicePanelProps) {
         <h1 className="text-gray-900 mb-2">Panel de Facturas</h1>
         <p className="text-gray-600">Gestiona y filtra todas las facturas del sistema</p>
       </div>
+
+      {/* Loading State */}
+      {loading && (
+        <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg mb-6 flex items-center gap-3">
+          <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+          <span className="text-blue-900">Cargando facturas...</span>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="bg-white p-6 rounded-lg border border-gray-200 mb-6">
@@ -323,8 +427,9 @@ export function InvoicePanel({ navigateTo, userRole }: InvoicePanelProps) {
                             )}
                           </button>
                           <button
+                            onClick={() => handleDownload(invoice)}
                             className="p-1 text-gray-600 hover:bg-gray-50 rounded"
-                            title="Descargar"
+                            title="Descargar archivo original"
                           >
                             <Download className="w-4 h-4" />
                           </button>
